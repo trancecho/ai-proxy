@@ -1,0 +1,35 @@
+version: '3'
+services:
+  db:
+    image: mysql:5.7
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword  # root用户密码
+      MYSQL_DATABASE: mydatabase        # 默认创建的数据库
+      MYSQL_USER: myuser                # 普通用户
+      MYSQL_PASSWORD: mypassword        # 普通用户的密码
+    ports:
+      - "3306:3306"
+    volumes:
+      - db-data:/var/lib/mysql
+    networks:
+      - mynetwork
+
+  app:
+    image: your-app-image
+    environment:
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_USER: myuser
+      DB_PASSWORD: mypassword
+      DB_NAME: mydatabase
+    depends_on:
+      - db
+    networks:
+      - mynetwork
+
+networks:
+  mynetwork:
+    driver: bridge
+
+volumes:
+  db-data:
