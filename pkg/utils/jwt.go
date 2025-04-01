@@ -61,7 +61,6 @@ func ParseToken(service string, tokenString string) (*Claims, error) {
 	}
 }
 func parseToken(secret []byte, tokenString string) (*Claims, error) {
-	log.Println("tokenString: ", tokenString)
 
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		return secret, nil
@@ -85,7 +84,6 @@ func parseToken(secret []byte, tokenString string) (*Claims, error) {
 func JWTAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := c.GetHeader("Authorization")
-		log.Println("Request Header: Authorization:", token) // 在此处打印请求的 Authorization 头
 
 		// 如果请求头里没有 Token，则尝试从 URL 查询参数获取
 		if token == "" {

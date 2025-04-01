@@ -1,107 +1,124 @@
 package domain
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"github.com/trancecho/ai-proxy/config"
 	"github.com/trancecho/ai-proxy/domain/dto"
+	"github.com/trancecho/ai-proxy/pkg/utils"
 	"github.com/trancecho/ai-proxy/po"
 	"github.com/trancecho/ai-proxy/po/repository"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
 type AIServicePo struct {
-	repo repository.ChatRepository // 改为接口类型，便于测试和扩展
+	repo repository.ChatRepository
 }
 
-// NewAIService 接受 ChatRepository 接口作为参数
 func NewAIService(repo repository.ChatRepository) *AIServicePo {
 	return &AIServicePo{
 		repo: repo,
 	}
 }
 
-func (s *AIServicePo) CallAIProxy(userID uint, req dto.ChatRequest) (*dto.ChatResponse, error) {
+// 获取聊天历史
+func (s *AIServicePo) GetChatHistory(userID uint) ([]po.RequestLog, error) {
+	return s.repo.GetUserChatHistory(userID)
+}
+
+// 调用大模型API
+func (s *AIServicePo) CallAIProxy(userID uint, req dto.ChatRequest) (string, error) {
 	apiURL := config.GetAPIURL()
-	fmt.Println("apiURL:", apiURL)
-	apiKey := config.GetAPIKey() // 获取 API Key
+	apiKey := config.GetAPIKey()
 
-	// 确保 Messages 不是 nil
-	var messages []dto.ChatMessage
-	if len(req.Messages) > 0 {
-		messages = req.Messages
-	}
-
-	// 组装 OpenAI 兼容的请求结构
-	reqData := dto.ChatRequest{
-		Model:       req.Model,
-		Stream:      req.Stream,
-		Messages:    messages,
-		MaxTokens:   req.MaxTokens,
-		Temperature: req.Temperature,
-	}
-
-	// JSON 序列化请求体
-	reqBody, err := json.Marshal(reqData)
+	// 组装请求
+	reqData, err := json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("marshal request failed: %w", err)
+		return "", fmt.Errorf("marshal request failed: %w", err)
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	request, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(reqBody))
+	request, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(reqData))
 	if err != nil {
-		return nil, fmt.Errorf("create request failed: %w", err)
+		return "", fmt.Errorf("create request failed: %w", err)
 	}
-
-	// 设置请求头
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+apiKey)
 
 	// 发送请求
 	resp, err := client.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("API request failed: %w", err)
+		return "", fmt.Errorf("API request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// 检查 HTTP 状态码
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API returned non-200 status: %d", resp.StatusCode)
+	// 如果是流式响应，使用逐行解析
+	if req.Stream {
+		return s.handleStreamResponse(resp.Body)
 	}
 
-	// 解析响应
+	// 普通 JSON 响应，直接解析
 	var aiResp dto.ChatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&aiResp); err != nil {
-		return nil, fmt.Errorf("decode response failed: %w", err)
+		return "", fmt.Errorf("decode response failed: %w", err)
 	}
 
-	// 解析返回的 AI 响应内容
-	if len(aiResp.Choices) == 0 || aiResp.Choices[0].Message.Content == "" {
-		return nil, fmt.Errorf("empty response from AI")
-	}
-	aiMessage := aiResp.Choices[0].Message.Content
-
-	// 记录日志
-	messagesJSON, _ := json.Marshal(messages) // 转换 messages 为 JSON 字符串存入数据库
-	log := po.RequestLog{
-		UserID:      userID,
-		Model:       req.Model,
-		Prompt:      string(messagesJSON),
-		Response:    aiMessage,
-		RequestTime: time.Now().Unix(),
+	// 只返回 Choices 中的第一个内容
+	if len(aiResp.Choices) > 0 {
+		// 处理可能含有 Markdown 的内容
+		processor := utils.MarkdownProcessor{}
+		return processor.Do(aiResp.Choices[0].Message.Content), nil
 	}
 
-	// 保存请求日志
-	if err := s.repo.SaveRequestLog(log); err != nil {
-		fmt.Printf("failed to save log: %v\n", err)
-	}
-
-	return &aiResp, nil
+	return "", fmt.Errorf("no content found in response")
 }
 
-// GetChatHistory 获取指定用户的聊天历史
-func (s *AIServicePo) GetChatHistory(userID uint) ([]po.RequestLog, error) {
-	return s.repo.GetUserChatHistory(userID)
+// 处理流式响应
+func (s *AIServicePo) handleStreamResponse(body io.ReadCloser) (string, error) {
+	defer body.Close()
+
+	reader := bufio.NewReader(body)
+	var responseContent string
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return "", fmt.Errorf("error reading stream: %w", err)
+		}
+
+		line = strings.TrimSpace(line)
+		if line == "" || line == "data: [DONE]" {
+			continue
+		}
+
+		// 移除 "data: " 前缀
+		if strings.HasPrefix(line, "data: ") {
+			line = strings.TrimPrefix(line, "data: ")
+		}
+
+		// 解析 JSON
+		var chunk dto.ChatResponse
+		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
+			fmt.Printf("Failed to parse JSON chunk: %s\n", line) // 调试日志
+			continue
+		}
+
+		// 拼接 Message.Content
+		for _, choice := range chunk.Choices {
+			responseContent += choice.Message.Content // 修正这里，直接使用 `choice.Message.Content`
+		}
+	}
+
+	// 返回拼接的内容
+	return responseContent, nil
 }
+
+//bug 1 没有保存到历史对话中去

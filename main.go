@@ -40,6 +40,13 @@ func main() {
 
 // 注册 API 路由
 func MakeRoutes(g *gin.Engine, chatHandler *domain.ChatHandler) {
+	// 根路由，返回欢迎信息或健康检查
+	g.GET("/", func(c *gin.Context) {
+		c.JSON(200, gin.H{
+			"message": "Welcome to the AI Proxy API",
+		})
+	})
+
 	// 发送 AI 询问
 	g.POST("/api/v1/chat", utils.JWTAuthMiddleware(), chatHandler.Chat)
 
